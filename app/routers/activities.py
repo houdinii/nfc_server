@@ -16,7 +16,7 @@ from app.schemas.activity import (
     ActivityCreate, ActivityUpdate, ActivityResponse,
     InterruptionCreate, ActivityStats
 )
-from app.utils import utc_now
+from app.utils import utc_now, make_aware
 
 router = APIRouter()
 
@@ -48,7 +48,7 @@ async def start_activity(
     if current_activity:
         current_activity.end_time = utc_now()
         current_activity.duration = int(
-            (current_activity.end_time - current_activity.start_time).total_seconds()
+            (current_activity.end_time - make_aware(current_activity.start_time)).total_seconds()
         )
 
     # Create new activity
@@ -103,7 +103,7 @@ async def end_activity(
     if update.end_time and not activity.end_time:
         activity.end_time = update.end_time or utc_now()
         activity.duration = int(
-            (activity.end_time - activity.start_time).total_seconds()
+            (activity.end_time - make_aware(activity.start_time)).total_seconds()
         )
 
         # Detect hyperfocus (activity > 90 minutes without interruption)
