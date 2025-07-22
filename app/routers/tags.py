@@ -1,8 +1,7 @@
 # app/routers/tags.py
 from datetime import timedelta
-from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import Depends, HTTPException
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
@@ -13,203 +12,149 @@ from app.models.tag import Tag
 from app.models.user import User
 from app.schemas.tag import TagCreate, TagUpdate, TagResponse, TagWithStats
 from app.utils import utc_now
-
-router = APIRouter()
-
-
-@router.post("/", response_model=TagResponse)
-async def create_tag(
-        tag: TagCreate,
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)
-):
-    """Create a new NFC tag registration"""
-
-    # Check if NFC ID already exists for this user
-    existing = db.query(Tag).filter(
-        and_(Tag.nfc_id == tag.nfc_id, Tag.user_id == current_user.id)
-    ).first()
-
-    if existing:
-        raise HTTPException(status_code=400, detail="Tag already registered")
-
-    new_tag = Tag(
-        user_id=current_user.id,
-        **tag.model_dump()
-    )
-
-    db.add(new_tag)
-    db.commit()
-    db.refresh(new_tag)
-
-    return new_tag
+from app.routers.base import CRUDRouter
 
 
-@router.get("/", response_model=List[TagResponse])
-async def get_tags(
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)
-):
-    """Get all tags for the current user"""
+class TagRouter(CRUDRouter[Tag, TagCreate, TagUpdate, TagResponse]):
+    @property
+    def model_class(self):
+        return Tag
 
-    tags = db.query(Tag).filter(Tag.user_id == current_user.id).all()
-    return tags
+    @property
+    def create_schema(self):
+        return TagCreate
 
+    @property
+    def update_schema(self):
+        return TagUpdate
 
-@router.get("/by-nfc/{nfc_id}", response_model=TagResponse)
-async def get_tag_by_nfc(
-        nfc_id: str,
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)
-):
-    """Get tag by NFC ID"""
+    @property
+    def response_schema(self):
+        return TagResponse
 
-    tag = db.query(Tag).filter(
-        and_(Tag.nfc_id == nfc_id, Tag.user_id == current_user.id)
-    ).first()
+    def __init__(self):
+        super().__init__(tags=["tags"])
+        self._setup_custom_routes()
 
-    if not tag:
-        raise HTTPException(status_code=404, detail="Tag not found")
+    def _setup_custom_routes(self):
+        """Setup tag-specific routes beyond basic CRUD"""
 
-    return tag
+        @self.router.get("/by-nfc/{nfc_id}", response_model=TagResponse)
+        async def get_tag_by_nfc(
+                nfc_id: str,
+                current_user: User = Depends(get_current_user),
+                db: Session = Depends(get_db)
+        ):
+            """Get tag by NFC ID"""
+            tag = db.query(Tag).filter(
+                and_(Tag.nfc_id == nfc_id, Tag.user_id == current_user.id)
+            ).first()
 
+            if not tag:
+                raise HTTPException(status_code=404, detail="Tag not found")
 
-@router.get("/{tag_id}", response_model=TagWithStats)
-async def get_tag_with_stats(
-        tag_id: str,
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)
-):
-    """Get tag with usage statistics"""
+            return tag
 
-    tag = db.query(Tag).filter(
-        and_(Tag.id == tag_id, Tag.user_id == current_user.id)
-    ).first()
+        @self.router.get("/{tag_id}/stats", response_model=TagWithStats)
+        async def get_tag_with_stats(
+                tag_id: str,
+                current_user: User = Depends(get_current_user),
+                db: Session = Depends(get_db)
+        ):
+            """Get tag with usage statistics"""
+            tag = self._get_user_entity(tag_id, current_user, db)
 
-    if not tag:
-        raise HTTPException(status_code=404, detail="Tag not found")
+            # Calculate statistics
+            now = utc_now()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            week_start = today_start - timedelta(days=today_start.weekday())
 
-    # Calculate statistics
-    now = utc_now()
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = today_start - timedelta(days=today_start.weekday())
+            # Get activities for this tag
+            activities = db.query(Activity).filter(
+                and_(
+                    Activity.tag_id == tag_id,
+                    Activity.user_id == current_user.id
+                )
+            ).all()
 
-    # Get activities for this tag
-    activities = db.query(Activity).filter(
-        and_(
-            Activity.tag_id == tag_id,
-            Activity.user_id == current_user.id
-        )
-    ).all()
+            # Calculate durations
+            total_duration_today = sum(
+                a.duration or 0 for a in activities
+                if a.start_time >= today_start
+            )
 
-    # Calculate durations
-    total_duration_today = sum(
-        a.duration or 0 for a in activities
-        if a.start_time >= today_start
-    )
+            total_duration_week = sum(
+                a.duration or 0 for a in activities
+                if a.start_time >= week_start
+            )
 
-    total_duration_week = sum(
-        a.duration or 0 for a in activities
-        if a.start_time >= week_start
-    )
+            completed_activities = [a for a in activities if a.duration]
+            average_duration = (
+                sum(a.duration for a in completed_activities) / len(completed_activities)
+                if completed_activities else 0
+            )
 
-    completed_activities = [a for a in activities if a.duration]
-    average_duration = (
-        sum(a.duration for a in completed_activities) / len(completed_activities)
-        if completed_activities else 0
-    )
+            # Get transition patterns (simplified)
+            transitions_to = {}
+            transitions_from = {}
 
-    # Get transition patterns (simplified)
-    transitions_to = {}
-    transitions_from = {}
+            for activity in activities:
+                if activity.previous_activity_id:
+                    prev = db.query(Activity).filter(Activity.id == activity.previous_activity_id).first()
+                    if prev:
+                        prev_tag = db.query(Tag).filter(Tag.id == prev.tag_id).first()
+                        if prev_tag:
+                            transitions_from[prev_tag.name] = transitions_from.get(prev_tag.name, 0) + 1
 
-    for activity in activities:
-        if activity.previous_activity_id:
-            prev = db.query(Activity).filter(Activity.id == activity.previous_activity_id).first()
-            if prev:
-                prev_tag = db.query(Tag).filter(Tag.id == prev.tag_id).first()
-                if prev_tag:
-                    transitions_from[prev_tag.name] = transitions_from.get(prev_tag.name, 0) + 1
+                # Find next activity
+                next_activity = db.query(Activity).filter(
+                    Activity.previous_activity_id == activity.id
+                ).first()
+                if next_activity:
+                    next_tag = db.query(Tag).filter(Tag.id == next_activity.tag_id).first()
+                    if next_tag:
+                        transitions_to[next_tag.name] = transitions_to.get(next_tag.name, 0) + 1
 
-        # Find next activity
-        next_activity = db.query(Activity).filter(
-            Activity.previous_activity_id == activity.id
+            # Peak usage hours
+            hour_counts = {}
+            for activity in activities:
+                hour = activity.start_time.hour
+                hour_counts[hour] = hour_counts.get(hour, 0) + 1
+
+            peak_hours = sorted(hour_counts.keys(), key=lambda h: hour_counts[h], reverse=True)[:3]
+
+            # Create response
+            response = TagWithStats(
+                **tag.__dict__,
+                total_duration_today=total_duration_today,
+                total_duration_week=total_duration_week,
+                average_session_duration=average_duration,
+                common_transitions_to=[
+                    {"tag": k, "count": v}
+                    for k, v in sorted(transitions_to.items(), key=lambda x: x[1], reverse=True)[:3]
+                ],
+                common_transitions_from=[
+                    {"tag": k, "count": v}
+                    for k, v in sorted(transitions_from.items(), key=lambda x: x[1], reverse=True)[:3]
+                ],
+                peak_usage_hours=peak_hours
+            )
+
+            return response
+
+    async def create_handler(self, create_data: TagCreate, current_user: User, db: Session) -> Tag:
+        """Override creates to check for duplicate NFC IDs"""
+        # Check if NFC ID already exists for this user
+        existing = db.query(Tag).filter(
+            and_(Tag.nfc_id == create_data.nfc_id, Tag.user_id == current_user.id)
         ).first()
-        if next_activity:
-            next_tag = db.query(Tag).filter(Tag.id == next_activity.tag_id).first()
-            if next_tag:
-                transitions_to[next_tag.name] = transitions_to.get(next_tag.name, 0) + 1
 
-    # Peak usage hours
-    hour_counts = {}
-    for activity in activities:
-        hour = activity.start_time.hour
-        hour_counts[hour] = hour_counts.get(hour, 0) + 1
+        if existing:
+            raise HTTPException(status_code=400, detail="Tag already registered")
 
-    peak_hours = sorted(hour_counts.keys(), key=lambda h: hour_counts[h], reverse=True)[:3]
-
-    # Create response
-    response = TagWithStats(
-        **tag.__dict__,
-        total_duration_today=total_duration_today,
-        total_duration_week=total_duration_week,
-        average_session_duration=average_duration,
-        common_transitions_to=[
-            {"tag": k, "count": v}
-            for k, v in sorted(transitions_to.items(), key=lambda x: x[1], reverse=True)[:3]
-        ],
-        common_transitions_from=[
-            {"tag": k, "count": v}
-            for k, v in sorted(transitions_from.items(), key=lambda x: x[1], reverse=True)[:3]
-        ],
-        peak_usage_hours=peak_hours
-    )
-
-    return response
+        return self._create_entity(create_data, current_user, db)
 
 
-@router.patch("/{tag_id}", response_model=TagResponse)
-async def update_tag(
-        tag_id: str,
-        update: TagUpdate,
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)
-):
-    """Update tag properties"""
-
-    tag = db.query(Tag).filter(
-        and_(Tag.id == tag_id, Tag.user_id == current_user.id)
-    ).first()
-
-    if not tag:
-        raise HTTPException(status_code=404, detail="Tag not found")
-
-    # Update fields
-    for field, value in update.model_dump(exclude_unset=True).items():
-        setattr(tag, field, value)
-
-    db.commit()
-    db.refresh(tag)
-
-    return tag
-
-
-@router.delete("/{tag_id}")
-async def delete_tag(
-        tag_id: str,
-        current_user: User = Depends(get_current_user),
-        db: Session = Depends(get_db)
-):
-    """Delete a tag and all associated activities"""
-
-    tag = db.query(Tag).filter(
-        and_(Tag.id == tag_id, Tag.user_id == current_user.id)
-    ).first()
-
-    if not tag:
-        raise HTTPException(status_code=404, detail="Tag not found")
-
-    db.delete(tag)
-    db.commit()
-
-    return {"message": "Tag deleted successfully"}
+# Create router instance
+tag_router = TagRouter()
+router = tag_router.router
