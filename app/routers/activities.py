@@ -38,10 +38,28 @@ class ActivityRouter(CRUDRouter[Activity, ActivityCreate, ActivityUpdate, Activi
 
     def __init__(self):
         super().__init__(tags=["activities"])
+
+    def _setup_routes(self):
+        """Setup routes with custom create route override"""
+        # Setup custom routes first
         self._setup_custom_routes()
+        # Setup remaining standard routes
+        self._setup_list_route()
+        self._setup_get_route()
+        self._setup_update_route()
+        self._setup_delete_route()
 
     def _setup_custom_routes(self):
         """Setup activity-specific routes beyond basic CRUD"""
+
+        # Override the create route with concrete types
+        @self.router.post("/", response_model=ActivityResponse)
+        async def create_activity(
+                create_data: ActivityCreate,
+                current_user: User = Depends(get_current_user),
+                db: Session = Depends(get_db)
+        ):
+            return await self.create_handler(create_data, current_user, db)
 
         @self.router.get("/current", response_model=Optional[ActivityResponse])
         async def get_current_activity(
@@ -174,13 +192,14 @@ class ActivityRouter(CRUDRouter[Activity, ActivityCreate, ActivityUpdate, Activi
                 (current_activity.end_time - make_aware(current_activity.start_time)).total_seconds()
             )
 
-        # Create new activity
+        # Create new activity  
+        activity_data = create_data.model_dump(exclude={'tag_id'})
         new_activity = Activity(
             user_id=current_user.id,
             tag_id=str(tag.id),
             start_time=utc_now(),
             previous_activity_id=str(current_activity.id) if current_activity else None,
-            **create_data.model_dump(exclude={'tag_id'})
+            **activity_data
         )
 
         # Update tag stats
