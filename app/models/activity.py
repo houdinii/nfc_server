@@ -2,9 +2,10 @@
 from sqlalchemy import Column, String, Integer, Boolean, Text, JSON, ForeignKey, DateTime, Index
 from sqlalchemy.orm import relationship
 from app.models.base import BaseModel
+from app.models.metrics import MetricTracker, ActivityMetricsMixin
 
 
-class Activity(BaseModel):
+class Activity(BaseModel, ActivityMetricsMixin):
     __tablename__ = "activities"
     __table_args__ = (
         Index('idx_user_time', 'user_id', 'start_time'),
@@ -22,15 +23,15 @@ class Activity(BaseModel):
     end_time = Column(DateTime(timezone=True))
     duration = Column(Integer)  # Calculated duration in seconds
 
-    # ADHD-specific metrics
-    energy_level = Column(Integer)  # 1-5 scale at start
-    energy_level_end = Column(Integer)  # 1-5 scale at end
-    focus_level = Column(Integer)  # 1-5 scale at start
-    focus_level_end = Column(Integer)  # 1-5 scale at end
+    # ADHD-specific metrics using MetricTracker
+    energy_level = MetricTracker.scale_column("Energy level at start (1-5)")
+    energy_level_end = MetricTracker.scale_column("Energy level at end (1-5)")
+    focus_level = MetricTracker.scale_column("Focus level at start (1-5)")
+    focus_level_end = MetricTracker.scale_column("Focus level at end (1-5)")
 
     # Mood tracking
-    mood_start = Column(String)  # happy, neutral, anxious, frustrated, calm, energetic
-    mood_end = Column(String)
+    mood_start = MetricTracker.mood_column("Mood at activity start")
+    mood_end = MetricTracker.mood_column("Mood at activity end")
     mood_notes = Column(Text)
 
     # Activity quality
@@ -49,7 +50,7 @@ class Activity(BaseModel):
     environment = Column(JSON, default={})  # noise_level, lighting, temperature, etc.
 
     # Productivity metrics
-    perceived_productivity = Column(Integer)  # 1-5 self-rating
+    perceived_productivity = MetricTracker.scale_column("Perceived productivity (1-5)")
     flow_state_achieved = Column(Boolean, default=False)
 
     # Notes and reflection
@@ -59,7 +60,7 @@ class Activity(BaseModel):
 
     # Medication tracking
     medication_taken = Column(Boolean)
-    medication_effective = Column(Integer)  # 1-5 effectiveness rating
+    medication_effective = MetricTracker.scale_column("Medication effectiveness (1-5)")
 
     # Relationships
     user = relationship("User", back_populates="activities")
